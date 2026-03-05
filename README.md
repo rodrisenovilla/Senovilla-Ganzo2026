@@ -20,4 +20,4 @@ Apart from R Markdowns and Jupyter Notebooks for reproducing the analysis, you c
 
 
 
-Data is stored in ArrayExpress (waiting for ID confirmation).
+Data is stored in ArrayExpress (E-MTAB-16735).
