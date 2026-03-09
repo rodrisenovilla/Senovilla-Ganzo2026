@@ -20,4 +20,4 @@ Apart from R Markdowns and Jupyter Notebooks for reproducing the analysis, you c
 
 
 
-Data is stored in ArrayExpress (E-MTAB-16735).
+Data is stored in ArrayExpress (E-MTAB-16735, in-house generated data) and BioStudies (S-BSST2816, fine-annotation from other publications).
