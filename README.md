@@ -18,6 +18,7 @@ Apart from R Markdowns and Jupyter Notebooks for reproducing the analysis, you c
 - Bash for Paroedura picta annotation in GeMoMa.sh
 - phastCons BigWig generation filtered by nonEutherians from mouse 60way and nonBirds from chick 77way using PHAST package.
 - Functions and variables employed for analyisis are stored in conf.R
+- Statistical analysis performed for gene parameters comparisons (pleiotropy and lethality across single cell datasets and gene sets) in Figure 7.
 
 
 
