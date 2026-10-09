@@ -1,0 +1,415 @@
+---
+title: "gene_parameters_statistics.Rmd"
+author: "phylobrain"
+date: "2026-10-08"
+output: html_document
+---
+
+
+
+## Statistic inference for Figure 7 (Senovilla-Ganzo et al., 2026)
+
+In most cases, single cell datasets lack enough biological replicates to consider them as statistical N. Although single cells could be consider as biological replicates, their large number and sequencing biases could lead to biased conclusions in classical statistical tests. Complementary to these classical tests, we propose permutations tests in-between the compared biological classes for Wilcox or non-parametric Mann-Whitney (pair-wise) and 1-way ANOVA or non-parametric Kruskal-Wallis (more than two groups, developmental comparisons).
+
+# Package Loading
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+```
+
+# Functions
+
+Here we include two functions that comprise classical statistical tests and permutations for pairwise and multiple conditions.
+
+
+```{r two-stages-function, echo=FALSE}
+permutation_test_two_stages <- function(data,
+                                          score_col,
+                                          group_col,
+                                          stage_a,
+                                          stage_b,
+                                          n_permutations = 10000,
+                                          seed = 0,
+                                          plot = TRUE) {
+  sub <- data[data[[group_col]] %in% c(stage_a, stage_b), ]
+  score <- as.numeric(sub[[score_col]])
+  group <- as.character(sub[[group_col]])
+  n <- length(score)
+  n_a <- sum(group == stage_a)
+  n_b <- n - n_a
+
+  # --- the standard (asymptotic) Wilcoxon test ---
+  wt <- wilcox.test(score[group == stage_a], score[group == stage_b])
+
+  # --- Permutation null: reshuffle which cells are "e7.0" vs "e8.5" ---
+  ranks <- rank(score, ties.method = "average")
+  observed_rank_sum_a <- sum(ranks[group == stage_a])
+  observed_mean_diff <- mean(score[group == stage_a]) - mean(score[group == stage_b])
+
+  if (!is.null(seed)) set.seed(seed)
+  perm_idx <- replicate(n_permutations, sample.int(n))
+
+  ranks_perm <- matrix(ranks[perm_idx], nrow = n, ncol = n_permutations)
+  rank_sum_a_null <- colSums(ranks_perm[seq_len(n_a), , drop = FALSE])
+
+  score_perm <- matrix(score[perm_idx], nrow = n, ncol = n_permutations)
+  mean_diff_null <- colMeans(score_perm[seq_len(n_a), , drop = FALSE]) -
+    colMeans(score_perm[(n_a + 1):n, , drop = FALSE])
+
+  # Two-sided empirical p-values: how often is the *random* relabeling's
+  # statistic at least as far from its null-expected value as what we saw?
+  expected_rank_sum <- n_a * (n + 1) / 2
+  p_perm_rank <- (sum(abs(rank_sum_a_null - expected_rank_sum) >=
+                       abs(observed_rank_sum_a - expected_rank_sum)) + 1) / (n_permutations + 1)
+  p_perm_mean <- (sum(abs(mean_diff_null) >= abs(observed_mean_diff)) + 1) / (n_permutations + 1)
+
+  cat(sprintf("%s: n = %d cells/genes, %s: n = %d genes/cells\n", stage_a, n_a, stage_b, n_b))
+  cat(sprintf("observed mean difference (%s - %s) = %.4f\n", stage_a, stage_b, observed_mean_diff))
+  cat("\n")
+  cat(sprintf("Wilcoxon test (asymptotic, what you ran):        p = %.4g\n", wt$p.value))
+  cat(sprintf("Permutation test on rank-sum statistic:          p = %.4g  (%d permutations)\n",
+              p_perm_rank, n_permutations))
+  cat(sprintf("Permutation test on mean difference:             p = %.4g  (%d permutations)\n",
+              p_perm_mean, n_permutations))
+  cat(sprintf("\n-> in %d / %d random relabelings, the difference was as extreme as observed (rank-sum).\n",
+              sum(abs(rank_sum_a_null - expected_rank_sum) >= abs(observed_rank_sum_a - expected_rank_sum)),
+              n_permutations))
+
+  if (p_perm_rank > 0.05) {
+   xrange <- range(c(mean_diff_null, observed_mean_diff))
+# add a little padding so the line isn't flush against the edge
+pad <- diff(xrange) * 0.05
+xrange <- xrange + c(-pad, pad)
+
+hist(mean_diff_null, breaks = 60, col = "#8899aa", border = NA,
+     xlim = xrange,
+     main = sprintf("null distribution under random relabeling\n(permutation p = %.4g)", p_perm_mean),
+     xlab = sprintf("mean difference (%s - %s)", stage_a, stage_b))
+abline(v = observed_mean_diff, col = "steelblue3", lwd = 2)
+legend("topright", legend = "observed", col = "steelblue3", lwd = 2, bty = "n")
+  }
+
+  invisible(list(
+    wilcoxon_p = wt$p.value,
+    permutation_p_rank = p_perm_rank,
+    permutation_p_mean = p_perm_mean,
+    observed_mean_diff = observed_mean_diff,
+    null_mean_diff = mean_diff_null
+  ))
+}
+```
+
+
+```{r trend-function}
+permutation_test_stages_trend <- function(data,
+                                            score_col,
+                                            group_col,
+                                            stage_order,
+                                            n_permutations = 10000,
+                                            seed = 0,
+                                            alternative = c("two", "greater", "less"),
+                                            plot = TRUE) {
+  alternative <- match.arg(alternative)
+  score <- as.numeric(data[[score_col]])
+  group <- as.character(data[[group_col]])
+  stage_pos <- match(group, stage_order)  # each cell's numeric position in the sequence
+  if (anyNA(stage_pos)) stop("Some group labels are not present in stage_order.")
+ 
+  n <- length(score)
+  ranks <- rank(score, ties.method = "average")
+ 
+  # Asymptotic reference (suppressWarnings: ties make the exact p unavailable,
+  # R falls back to the normal approximation, which is fine at this n)
+  st <- suppressWarnings(cor.test(score, stage_pos, method = "spearman", alternative = alternative))
+  observed_rho <- unname(st$estimate)
+ 
+  if (!is.null(seed)) set.seed(seed)
+  perm_idx <- replicate(n_permutations, sample.int(n))
+  rank_perm <- matrix(ranks[perm_idx], nrow = n, ncol = n_permutations)
+  null_rho <- as.vector(cor(rank_perm, stage_pos))  # Pearson corr of ranks == Spearman corr
+ 
+  p_perm <- switch(alternative,
+    "two" = (sum(abs(null_rho) >= abs(observed_rho)) + 1) / (n_permutations + 1),
+    "greater"   = (sum(null_rho >= observed_rho) + 1) / (n_permutations + 1),
+    "less"      = (sum(null_rho <= observed_rho) + 1) / (n_permutations + 1)
+  )
+ 
+  cat(sprintf("stage order: %s\n", paste(stage_order, collapse = " -> ")))
+  cat(sprintf("observed Spearman rho (score vs. developmental order) = %.4f\n", observed_rho))
+  cat(sprintf("Spearman test (asymptotic):         p = %.4g\n", st$p.value))
+  cat(sprintf("Permutation test on rho:            p = %.4g  (%d permutations)\n", p_perm, n_permutations))
+ 
+  if (plot) {
+xrange <- range(c(null_rho, observed_rho))
+pad <- diff(xrange) * 0.05
+xrange <- c(max(xrange[1] - pad, -1), min(xrange[2] + pad, 1))
+
+hist(null_rho, breaks = 60, col = "#8899aa", border = NA,
+     xlim = xrange,
+     main = sprintf("null distribution (trend)\npermutation p = %.4g", p_perm),
+     xlab = "Spearman rho under random relabeling")
+abline(v = observed_rho, col = "steelblue", lwd = 2)
+legend("topright", legend = "observed", col = "steelblue", lwd = 2, bty = "n")
+  }
+ 
+invisible(list(observed_rho = observed_rho, spearman_p = st$p.value, permutation_p = p_perm, null_rho = null_rho))
+
+}
+```
+
+############ Pleiotropy Mouse
+
+# Data Loading 
+
+```{r pleio-mouse-load}
+pleio_path<-"/media/phylobrain/Seagate_Basic/sds/rsenovilla/rudi/work/rsenovilla/hourglass/pleio_all_devad_041224.csv"
+pleio_all<-read.csv2(pleio_path, sep = ",", row.names = 1)
+pleio_all <- pleio_all %>% mutate(cell_type = celltype, mean = as.double(mean)) %>%
+  separate(celltype, into = c("stage", "type"), sep = "-")
+pleio_all <- pleio_all %>% filter(stage != unique(pleio_all$stage)[2])
+```
+
+
+# Comparisons
+
+```{r pleio-mouse-pairwise}
+# Pair-wise
+stages <- pleio_all$stage %>% unique()
+pairs <- combn(stages, 2) 
+
+for (i in seq_len(ncol(pairs))) {
+  a <- pairs[1, i]
+  b <- pairs[2, i]
+  cat("Comparing", a, "vs", b, "\n")
+  permutation_test_two_stages(pleio_all, "mean", "stage", a, b)
+  
+}
+```
+
+```{r pleio-mouse-trend}
+# Trend - Multigroup
+num <- suppressWarnings(as.numeric(sub("^e", "", pleio_all$stage)))
+stage_order <- pleio_all$stage[order(num, na.last = TRUE)] %>% unique()
+permutation_test_stages_trend(pleio_all %>% arrange(stage %in% stage_order),  alternative = "two",
+                               score_col = "mean", group_col = "stage" , stage_order = rev(stage_order))
+```
+
+############ Pleiotropy Chick
+
+# Data Loading 
+
+
+```{r pleio-chick-load}
+pleio_path<-"/media/phylobrain/Seagate_Basic/sds/rsenovilla/rudi/work/rsenovilla/hourglass/pleio_all_devad_041224.csv"
+pleio_all<-read.csv2(pleio_path, sep = ",", row.names = 1)
+pleio_all <- pleio_all %>% mutate(cell_type = celltype, mean = as.double(mean)) %>%
+  separate(celltype, into = c("stage", "type"), sep = "-")
+pleio_all <- pleio_all %>% filter(stage != unique(pleio_all$stage)[2])
+```
+
+
+# Comparisons
+
+```{r pleio-chick-pairwise}
+# Pair-wise
+stages <- pleio_all$stage %>% unique()
+pairs <- combn(stages, 2) 
+
+for (i in seq_len(ncol(pairs))) {
+  a <- pairs[1, i]
+  b <- pairs[2, i]
+  cat("Comparing", a, "vs", b, "\n")
+  permutation_test_two_stages(pleio_all, "mean", "stage", a, b)
+  
+}
+```
+
+```{r pleio-chick-trend}
+# Trend - Multigroup
+num <- suppressWarnings(as.numeric(sub("^e", "", pleio_all$stage)))
+stage_order <- pleio_all$stage[order(num, na.last = TRUE)] %>% unique()
+permutation_test_stages_trend(pleio_all %>% arrange(stage %in% stage_order),  alternative = "two",
+                               score_col = "mean", group_col = "stage" , stage_order = rev(stage_order))
+```
+
+
+
+############ Lethality Mouse
+
+# Data Loading 
+
+```{r lethal-mouse-load}
+lethal_path<-"/media/phylobrain/Seagate_Basic/sds/rsenovilla/rudi/work/rsenovilla/hourglass/lethal_all_010324.csv"
+lethal_all<-read.csv2(lethal_path, sep = ",")
+lethal_path<-"/media/phylobrain/Seagate_Basic/sds/rsenovilla/rudi/work/rsenovilla/hourglass/lethal_adolescent_280824.csv"
+lethal_adolescent<-read.csv2(lethal_path, sep = ",")
+
+lethal <- rbind(lethal_adolescent, lethal_all)
+lethal <- lethal %>% mutate(cell_type = celltype, mean = as.double(mean)) %>%
+  separate(celltype, into = c("stage", "type"), sep = "-")
+lethal <- lethal %>% filter(stage %in% c( "e8.0" , "e8.25" , "e8.5" , "e9.0" , "e10.0" , "e11.0" , "e12.0", "e12.5" , "e13.0" , "e13.5" , "e14.0" , "e14.5" , "e15.0" , "e15.5" , "e16.0" , "e16.25", "e16.5" , "e17.0" , "e17.5" , "e18.0" , "Adolescent"))
+```
+
+
+# Comparisons
+
+```{r lethal-mouse-pairwise}
+# Pair-wise
+stages <- lethal$stage %>% unique()
+pairs <- combn(stages, 2) 
+
+for (i in seq_len(ncol(pairs))) {
+  a <- pairs[1, i]
+  b <- pairs[2, i]
+  cat("Comparing", a, "vs", b, "\n")
+  permutation_test_two_stages(pleio_all, "mean", "stage", a, b)
+  
+}
+```
+
+```{r lethal-mouse-trend}
+# Trend - Multigroup
+num <- suppressWarnings(as.numeric(sub("^e", "", lethal$stage)))
+stage_order <- lethal$stage[order(num, na.last = TRUE)] %>% unique()
+permutation_test_stages_trend(lethal %>% arrange(stage %in% stage_order),  alternative = "two",
+                               score_col = "mean", group_col = "stage" , stage_order = rev(stage_order))
+```
+
+
+################# Gene Sets Pleiotropy
+
+#Data loading
+
+```{r load gene sets}
+pleio_mm_genesets<-read.csv("~/bioinfo/sc_phylobrain/fig6/pleio_genesets_mousechick.csv", row.names = 1) %>% filter(species == "mouse")
+pleio_gg_genesets<-read.csv("~/bioinfo/sc_phylobrain/fig6/pleio_genesets_mousechick.csv", row.names = 1) %>% filter(species == "chick")
+```
+
+
+```{r comparison mm pleio gene sets}
+# Pair-wise pleio_mm
+class <- pleio_mm_genesets$class %>% unique()
+pairs <- combn(class, 2) 
+
+for (i in seq_len(ncol(pairs))) {
+  a <- pairs[1, i]
+  b <- pairs[2, i]
+  cat("Comparing", a, "vs", b, "\n")
+  permutation_test_two_stages(pleio_mm_genesets, "Pleiotropy", "class", a, b)
+  
+}
+```
+
+
+```{r comparison pleio chick}
+# Pair-wise pleio_gg
+class <- pleio_gg_genesets$class %>% unique()
+pairs <- combn(class, 2) 
+
+for (i in seq_len(ncol(pairs))) {
+  a <- pairs[1, i]
+  b <- pairs[2, i]
+  cat("Comparing", a, "vs", b, "\n")
+  permutation_test_two_stages(pleio_gg_genesets, "Pleiotropy", "class", a, b)
+  
+}
+```
+
+
+
+########### Gene sets lethality
+
+#Data loading
+
+```{r data loading lethality}
+lethal_genesets<-read.csv("~/bioinfo/sc_phylobrain/fig6/lethal_genesets_mousechick.csv", row.names = 1)
+```
+
+# Comparisons
+
+Here we don't employ initial functions to adapt to categorical values, which are the impact after gene deletion.
+
+```{r two-stages-function lethality, echo=FALSE}
+  data <- lethal_genesets
+  score_col <- "plot"
+  group_col <- "class"
+  stage_a <- "All genes"
+  stage_b <- "Brain bauplan"
+  n_permutations = 10000
+  seed = 0
+  
+  #Variation from original functions to adapt to categorical parameter
+  sub <- data[data[[group_col]] %in% c(stage_a, stage_b), ] %>% group_by(class) %>% mutate(plot = ifelse(bin == "Cellular Lethal"| bin == "Developmental Lethal", "Lethal", "Other viable")) %>% mutate(plot = factor(plot) %>% as.numeric())
+  score <- as.numeric(sub[[score_col]])
+  group <- as.character(sub[[group_col]])
+  n <- length(score)
+  n_a <- sum(group == stage_a)
+  n_b <- n - n_a
+
+  # --- the standard (asymptotic) Wilcoxon test ---
+  wt <- wilcox.test(score[group == stage_a], score[group == stage_b])
+
+  # --- Permutation null: reshuffle which cells are "e7.0" vs "e8.5" ---
+  ranks <- rank(score, ties.method = "average")
+  observed_rank_sum_a <- sum(ranks[group == stage_a])
+  observed_mean_diff <- mean(score[group == stage_a]) - mean(score[group == stage_b])
+
+  if (!is.null(seed)) set.seed(seed)
+  perm_idx <- replicate(n_permutations, sample.int(n))
+
+  ranks_perm <- matrix(ranks[perm_idx], nrow = n, ncol = n_permutations)
+  rank_sum_a_null <- colSums(ranks_perm[seq_len(n_a), , drop = FALSE])
+
+  score_perm <- matrix(score[perm_idx], nrow = n, ncol = n_permutations)
+  mean_diff_null <- colMeans(score_perm[seq_len(n_a), , drop = FALSE]) -
+    colMeans(score_perm[(n_a + 1):n, , drop = FALSE])
+
+  # Two-sided empirical p-values: how often is the *random* relabeling's
+  # statistic at least as far from its null-expected value as what we saw?
+  expected_rank_sum <- n_a * (n + 1) / 2
+  p_perm_rank <- (sum(abs(rank_sum_a_null - expected_rank_sum) >=
+                       abs(observed_rank_sum_a - expected_rank_sum)) + 1) / (n_permutations + 1)
+  p_perm_mean <- (sum(abs(mean_diff_null) >= abs(observed_mean_diff)) + 1) / (n_permutations + 1)
+
+  cat(sprintf("%s: n = %d cells/genes, %s: n = %d genes/cells\n", stage_a, n_a, stage_b, n_b))
+  cat(sprintf("observed mean difference (%s - %s) = %.4f\n", stage_a, stage_b, observed_mean_diff))
+  cat("\n")
+  cat(sprintf("Wilcoxon test (asymptotic, what you ran):        p = %.4g\n", wt$p.value))
+  cat(sprintf("Permutation test on rank-sum statistic:          p = %.4g  (%d permutations)\n",
+              p_perm_rank, n_permutations))
+  cat(sprintf("Permutation test on mean difference:             p = %.4g  (%d permutations)\n",
+              p_perm_mean, n_permutations))
+  cat(sprintf("\n-> in %d / %d random relabelings, the difference was as extreme as observed (rank-sum).\n",
+              sum(abs(rank_sum_a_null - expected_rank_sum) >= abs(observed_rank_sum_a - expected_rank_sum)),
+              n_permutations))
+
+  if (p_perm_rank < 0.05) {
+   xrange <- range(c(mean_diff_null, observed_mean_diff))
+# add a little padding so the line isn't flush against the edge
+pad <- diff(xrange) * 0.05
+xrange <- xrange + c(-pad, pad)
+
+hist(mean_diff_null, breaks = 60, col = "#8899aa", border = NA,
+     xlim = xrange,
+     main = sprintf("null distribution under random relabeling\n(permutation p = %.4g)", p_perm_mean),
+     xlab = sprintf("mean difference (%s - %s)", stage_a, stage_b))
+abline(v = observed_mean_diff, col = "steelblue3", lwd = 2)
+legend("topright", legend = "observed", col = "steelblue3", lwd = 2, bty = "n")
+  }
+
+  invisible(list(
+    wilcoxon_p = wt$p.value,
+    permutation_p_rank = p_perm_rank,
+    permutation_p_mean = p_perm_mean,
+    observed_mean_diff = observed_mean_diff,
+    null_mean_diff = mean_diff_null
+  ))
+
+```
+
+
+
+
